@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Minesweeper</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="game">
+      <header class="topbar">
+        <h1>Minesweeper</h1>
+        <button id="reset-btn" type="button">Chơi mới</button>
+      </header>
+
+      <div class="hud">
+        <div class="hud-item">
+          <span class="label">Bom còn lại</span>
+          <strong id="mine-count">12</strong>
+        </div>
+        <div class="hud-item">
+          <span class="label">Thời gian</span>
+          <strong id="timer">180</strong>
+        </div>
+        <div class="hud-item status-box">
+          <span class="label">Trạng thái</span>
+          <strong id="status">Sẵn sàng</strong>
+        </div>
+      </div>
+
+      <div class="instructions" aria-label="Game instructions">
+        <h2>Cách chơi</h2>
+        <ul>
+          <li>Nhấn chuột trái vào ô để lật ô.</li>
+          <li>Số trên ô cho biết có bao nhiêu bom xung quanh.</li>
+          <li>Nhấn chuột phải để gắn hoặc bỏ cờ.</li>
+          <li>Nhấn R để bắt đầu ván mới bất cứ lúc nào.</li>
+          <li>Bạn có 180 giây để mở hết ô an toàn.</li>
+          <li>Mở hết các ô an toàn để thắng.</li>
+        </ul>
+      </div>
+
+      <div id="board" class="board" aria-label="Minesweeper board"></div>
+    </main>
+
+    <script src="script.js"></script>
+  </body>
+</html>
