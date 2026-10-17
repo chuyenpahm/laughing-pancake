@@ -1,501 +1,1119 @@
-const BOARD_SIZE = 10;
-const MINE_COUNT = 12;
-const TIME_LIMIT = 180;
+const MAX_PLAYERS = 16;
+const MIN_PLAYERS = 5;
+const PHASE_SECONDS = 30;
 
-const boardElement = document.getElementById('board');
-const resetButton = document.getElementById('reset-btn');
-const mineCountElement = document.getElementById('mine-count');
-const timerElement = document.getElementById('timer');
-const statusElement = document.getElementById('status');
-const fireworksCanvas = document.getElementById('fireworks');
-const gameFeedbackElement = document.getElementById('game-feedback');
-const fireworksContext = fireworksCanvas.getContext('2d');
+const ROLE_INFO = {
+  wolf: {
+    label: "Ma sói",
+    symbol: "☾",
+    description: "Cùng bầy sói chọn một dân làng để tấn công mỗi đêm.",
+  },
+  seer: {
+    label: "Tiên tri",
+    symbol: "✧",
+    description: "Mỗi đêm, soi một người để khám phá phe của họ.",
+  },
+  witch: {
+    label: "Phù thủy",
+    symbol: "⚗",
+    description: "Có một thuốc cứu người bị sói cắn và một thuốc độc.",
+  },
+  guard: {
+    label: "Bảo vệ",
+    symbol: "♧",
+    description: "Mỗi đêm, bảo vệ một người khỏi sói. Không thể bảo vệ cùng người hai đêm liên tiếp.",
+  },
+  villager: {
+    label: "Dân làng",
+    symbol: "✦",
+    description: "Lắng nghe, tìm manh mối và cùng dân làng bỏ phiếu tìm sói.",
+  },
+};
 
-let board = [];
-let gameOver = false;
-let firstMove = true;
-let flaggedCount = 0;
-let timeLeft = TIME_LIMIT;
-let timerId = null;
-let audioContext = null;
-let fireworksFrameId = null;
-let feedbackTimeoutId = null;
+const ROLE_SETTINGS = [
+  { id: "wolf", label: "Ma sói", hint: "Phe sói · ít nhất 1" },
+  { id: "seer", label: "Tiên tri", hint: "Soi phe của một người mỗi đêm" },
+  { id: "witch", label: "Phù thủy", hint: "Một thuốc cứu · một thuốc độc" },
+  { id: "guard", label: "Bảo vệ", hint: "Chọn một người để bảo vệ mỗi đêm" },
+];
 
-function unlockAudio() {
-  if (!audioContext) {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass) {
-      console.warn('Trình duyệt không hỗ trợ âm thanh trò chơi.');
-      return;
-    }
-    audioContext = new AudioContextClass();
+const elements = {
+  welcome: document.getElementById("welcome-screen"),
+  lobby: document.getElementById("lobby-screen"),
+  game: document.getElementById("game-screen"),
+  name: document.getElementById("player-name"),
+  nameError: document.getElementById("name-error"),
+  create: document.getElementById("create-room"),
+  joinForm: document.getElementById("join-form"),
+  roomCodeInput: document.getElementById("room-code"),
+  connectionError: document.getElementById("connection-error"),
+  lobbyDescription: document.getElementById("lobby-description"),
+  roomCode: document.getElementById("display-room-code"),
+  copyRoom: document.getElementById("copy-room-code"),
+  playerCount: document.getElementById("player-count"),
+  playerList: document.getElementById("player-list"),
+  roleSettings: document.getElementById("role-settings"),
+  rolesPanel: document.getElementById("roles-panel"),
+  rolesError: document.getElementById("roles-error"),
+  lobbyStatus: document.getElementById("lobby-status"),
+  start: document.getElementById("start-game"),
+  round: document.getElementById("round-number"),
+  phaseTitle: document.getElementById("phase-title"),
+  timer: document.getElementById("phase-timer"),
+  roleSymbol: document.getElementById("role-symbol"),
+  role: document.getElementById("my-role"),
+  roleDescription: document.getElementById("role-description"),
+  actionTitle: document.getElementById("action-title"),
+  actionDescription: document.getElementById("action-description"),
+  announcement: document.getElementById("game-announcement"),
+  actionArea: document.getElementById("action-area"),
+  aliveCount: document.getElementById("alive-count"),
+  gamePlayerList: document.getElementById("game-player-list"),
+  privateNote: document.getElementById("private-note"),
+  gameConnectionStatus: document.getElementById("game-connection-status"),
+  toast: document.getElementById("toast"),
+};
+
+let peer = null;
+let roomCode = "";
+let hostPeerId = "";
+let isHost = false;
+let localName = "";
+let localPlayerId = "";
+let room = null;
+let myPrivateState = null;
+let roomConnections = new Map();
+let hostConnection = null;
+let reconnectTimeout = null;
+let phaseTimeout = null;
+let toastTimeout = null;
+let lastActionPhase = "";
+let pendingPoisonTarget = "";
+let pendingSave = true;
+
+function randomId() {
+  return crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function showScreen(screen) {
+  elements.welcome.hidden = screen !== "welcome";
+  elements.lobby.hidden = screen !== "lobby";
+  elements.game.hidden = screen !== "game";
+}
+
+function showToast(message) {
+  elements.toast.textContent = message;
+  elements.toast.hidden = false;
+  window.clearTimeout(toastTimeout);
+  toastTimeout = window.setTimeout(() => {
+    elements.toast.hidden = true;
+  }, 3200);
+}
+
+function getPlayerName() {
+  const value = elements.name.value.trim();
+  if (value.length < 2 || value.length > 20) {
+    elements.nameError.textContent = "Tên cần có từ 2 đến 20 ký tự.";
+    elements.name.focus();
+    return "";
   }
-
-  if (audioContext.state === 'suspended') {
-    audioContext.resume().catch((error) => {
-      console.warn('Không thể bật âm thanh trò chơi:', error);
-    });
-  }
+  elements.nameError.textContent = "";
+  localStorage.setItem("werewolf-player-name", value);
+  return value;
 }
 
-function playApplause() {
-  if (!audioContext) return;
-
-  const sampleCount = Math.floor(audioContext.sampleRate * 0.12);
-  const noiseBuffer = audioContext.createBuffer(1, sampleCount, audioContext.sampleRate);
-  const noise = noiseBuffer.getChannelData(0);
-  for (let i = 0; i < sampleCount; i += 1) {
-    noise[i] = Math.random() * 2 - 1;
-  }
-
-  const now = audioContext.currentTime;
-  for (let i = 0; i < 28; i += 1) {
-    const startTime = now + Math.random() * 1.8;
-    const source = audioContext.createBufferSource();
-    const filter = audioContext.createBiquadFilter();
-    const gain = audioContext.createGain();
-
-    source.buffer = noiseBuffer;
-    filter.type = 'highpass';
-    filter.frequency.value = 900;
-    gain.gain.setValueAtTime(0.0001, startTime);
-    gain.gain.exponentialRampToValueAtTime(0.16, startTime + 0.008);
-    gain.gain.exponentialRampToValueAtTime(0.0001, startTime + 0.11);
-
-    source.connect(filter);
-    filter.connect(gain);
-    gain.connect(audioContext.destination);
-    source.start(startTime);
-    source.stop(startTime + 0.12);
-  }
+function newRoomCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = crypto.getRandomValues(new Uint8Array(6));
+  return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("");
 }
 
-function playBoo() {
-  if (!audioContext) return;
-
-  const now = audioContext.currentTime;
-  const duration = 1.5;
-  const oscillator = audioContext.createOscillator();
-  const undertone = audioContext.createOscillator();
-  const filter = audioContext.createBiquadFilter();
-  const gain = audioContext.createGain();
-  const wobble = audioContext.createOscillator();
-  const wobbleDepth = audioContext.createGain();
-
-  oscillator.type = 'sawtooth';
-  oscillator.frequency.setValueAtTime(145, now);
-  oscillator.frequency.linearRampToValueAtTime(118, now + duration);
-  undertone.type = 'triangle';
-  undertone.frequency.setValueAtTime(138, now);
-  undertone.frequency.linearRampToValueAtTime(112, now + duration);
-  filter.type = 'lowpass';
-  filter.frequency.value = 500;
-  gain.gain.setValueAtTime(0.0001, now);
-  gain.gain.linearRampToValueAtTime(0.12, now + 0.2);
-  gain.gain.setValueAtTime(0.12, now + 1.05);
-  gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
-
-  wobble.type = 'sine';
-  wobble.frequency.value = 4;
-  wobbleDepth.gain.value = 5;
-  wobble.connect(wobbleDepth);
-  wobbleDepth.connect(oscillator.frequency);
-
-  oscillator.connect(filter);
-  undertone.connect(filter);
-  filter.connect(gain);
-  gain.connect(audioContext.destination);
-  oscillator.start(now);
-  undertone.start(now);
-  wobble.start(now);
-  oscillator.stop(now + duration);
-  undertone.stop(now + duration);
-  wobble.stop(now + duration);
-}
-
-function showFireworks() {
-  const context = fireworksContext;
-  if (!context) return;
-
-  const width = window.innerWidth;
-  const height = window.innerHeight;
-  const pixelRatio = window.devicePixelRatio || 1;
-  fireworksCanvas.width = Math.floor(width * pixelRatio);
-  fireworksCanvas.height = Math.floor(height * pixelRatio);
-  context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-
-  const particles = [];
-  const startTime = performance.now();
-  let lastBurstTime = startTime - 400;
-
-  function burst() {
-    const x = width * (0.12 + Math.random() * 0.76);
-    const y = height * (0.12 + Math.random() * 0.48);
-    const hue = Math.floor(Math.random() * 360);
-
-    for (let i = 0; i < 42; i += 1) {
-      const angle = (Math.PI * 2 * i) / 42;
-      const speed = 1.2 + Math.random() * 3.2;
-      particles.push({
-        x,
-        y,
-        vx: Math.cos(angle) * speed,
-        vy: Math.sin(angle) * speed,
-        hue,
-        age: 0,
-        lifetime: 55 + Math.random() * 35,
-      });
-    }
-  }
-
-  function animate(now) {
-    const elapsed = now - startTime;
-    if (elapsed < 2300 && now - lastBurstTime >= 380) {
-      burst();
-      lastBurstTime = now;
-    }
-
-    context.clearRect(0, 0, width, height);
-    for (let i = particles.length - 1; i >= 0; i -= 1) {
-      const particle = particles[i];
-      particle.x += particle.vx;
-      particle.y += particle.vy;
-      particle.vy += 0.025;
-      particle.age += 1;
-
-      if (particle.age >= particle.lifetime) {
-        particles.splice(i, 1);
-        continue;
-      }
-
-      context.globalAlpha = 1 - particle.age / particle.lifetime;
-      context.fillStyle = `hsl(${particle.hue}, 100%, 65%)`;
-      context.beginPath();
-      context.arc(particle.x, particle.y, 2.5, 0, Math.PI * 2);
-      context.fill();
-    }
-    context.globalAlpha = 1;
-
-    if (elapsed < 3300) {
-      fireworksFrameId = requestAnimationFrame(animate);
-    } else {
-      context.clearRect(0, 0, width, height);
-      fireworksFrameId = null;
-    }
-  }
-
-  fireworksFrameId = requestAnimationFrame(animate);
-}
-
-function celebrateWin() {
-  gameFeedbackElement.textContent = 'Chúc mừng! Bạn đã chiến thắng! 🎉';
-  gameFeedbackElement.hidden = false;
-  showFireworks();
-  playApplause();
-  feedbackTimeoutId = window.setTimeout(() => {
-    gameFeedbackElement.hidden = true;
-  }, 3300);
-}
-
-function createEmptyBoard() {
-  return Array.from({ length: BOARD_SIZE }, () =>
-    Array.from({ length: BOARD_SIZE }, () => ({
-      mine: false,
-      revealed: false,
-      flagged: false,
-      adjacent: 0,
-    }))
-  );
-}
-
-function inBounds(row, col) {
-  return row >= 0 && row < BOARD_SIZE && col >= 0 && col < BOARD_SIZE;
-}
-
-function getNeighbors(row, col) {
-  const neighbors = [];
-
-  for (let r = row - 1; r <= row + 1; r += 1) {
-    for (let c = col - 1; c <= col + 1; c += 1) {
-      if (r === row && c === col) continue;
-      if (inBounds(r, c)) {
-        neighbors.push({ row: r, col: c });
-      }
-    }
-  }
-
-  return neighbors;
-}
-
-function placeMines(excludeRow, excludeCol) {
-  const positions = [];
-
-  for (let row = 0; row < BOARD_SIZE; row += 1) {
-    for (let col = 0; col < BOARD_SIZE; col += 1) {
-      if (row === excludeRow && col === excludeCol) continue;
-      positions.push({ row, col });
-    }
-  }
-
-  for (let i = positions.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [positions[i], positions[j]] = [positions[j], positions[i]];
-  }
-
-  for (let i = 0; i < MINE_COUNT; i += 1) {
-    const { row, col } = positions[i];
-    board[row][col].mine = true;
-  }
-
-  for (let row = 0; row < BOARD_SIZE; row += 1) {
-    for (let col = 0; col < BOARD_SIZE; col += 1) {
-      if (board[row][col].mine) continue;
-      board[row][col].adjacent = getNeighbors(row, col).filter(
-        ({ row: r, col: c }) => board[r][c].mine
-      ).length;
-    }
-  }
-}
-
-function revealAllMines() {
-  for (let row = 0; row < BOARD_SIZE; row += 1) {
-    for (let col = 0; col < BOARD_SIZE; col += 1) {
-      const cell = board[row][col];
-      if (cell.flagged && !cell.mine) {
-        cell.flagged = false;
-      }
-
-      if (cell.mine) {
-        cell.flagged = false;
-        cell.revealed = true;
-      }
-    }
-  }
-}
-
-function revealEmptyArea(row, col) {
-  const queue = [{ row, col }];
-  const visited = new Set();
-
-  while (queue.length > 0) {
-    const current = queue.shift();
-    const key = `${current.row}-${current.col}`;
-
-    if (visited.has(key)) continue;
-    visited.add(key);
-
-    const cell = board[current.row][current.col];
-    if (cell.flagged || cell.revealed) continue;
-
-    cell.revealed = true;
-
-    if (cell.adjacent === 0) {
-      for (const neighbor of getNeighbors(current.row, current.col)) {
-        const neighborCell = board[neighbor.row][neighbor.col];
-        if (!neighborCell.revealed && !neighborCell.mine && !neighborCell.flagged) {
-          queue.push(neighbor);
-        }
-      }
-    }
-  }
-}
-
-function checkWin() {
-  let revealedSafeCells = 0;
-
-  for (let row = 0; row < BOARD_SIZE; row += 1) {
-    for (let col = 0; col < BOARD_SIZE; col += 1) {
-      const cell = board[row][col];
-      if (!cell.mine && cell.revealed) {
-        revealedSafeCells += 1;
-      }
-    }
-  }
-
-  return revealedSafeCells === BOARD_SIZE * BOARD_SIZE - MINE_COUNT;
-}
-
-function setStatus(text) {
-  statusElement.textContent = text;
-}
-
-function updateTimerDisplay() {
-  timerElement.textContent = String(timeLeft);
-}
-
-function stopTimer() {
-  if (timerId) {
-    clearInterval(timerId);
-    timerId = null;
-  }
-}
-
-function endGame(message, outcome) {
-  gameOver = true;
-  revealAllMines();
-  stopTimer();
-  setStatus(message);
-  renderBoard();
-
-  if (outcome === 'win') {
-    celebrateWin();
-  } else {
-    playBoo();
-  }
-}
-
-function handleTimeout() {
-  if (gameOver) return;
-
-  endGame('Hết giờ! Đáp án đã lộ.', 'loss');
-}
-
-function startTimer() {
-  stopTimer();
-  timerId = setInterval(() => {
-    if (gameOver) {
-      stopTimer();
-      return;
-    }
-
-    timeLeft -= 1;
-    updateTimerDisplay();
-
-    if (timeLeft <= 0) {
-      handleTimeout();
-    }
-  }, 1000);
-}
-
-function revealAt(row, col) {
-  if (gameOver) return;
-
-  unlockAudio();
-
-  if (firstMove) {
-    placeMines(row, col);
-    firstMove = false;
-    startTimer();
-  }
-
-  const selectedCell = board[row][col];
-  if (selectedCell.flagged || selectedCell.revealed) return;
-
-  if (selectedCell.mine) {
-    selectedCell.revealed = true;
-    endGame('Boom! Đáp án đã lộ.', 'loss');
+function createRoom() {
+  if (typeof Peer === "undefined") {
+    elements.connectionError.textContent =
+      "Không tải được dịch vụ kết nối. Kiểm tra Internet rồi tải lại trang.";
     return;
   }
 
-  revealEmptyArea(row, col);
+  localName = getPlayerName();
+  if (!localName) return;
 
-  if (checkWin()) {
-    endGame('Bạn thắng! Đáp án đã lộ.', 'win');
-  } else {
-    setStatus('Đang chơi');
-  }
+  isHost = true;
+  roomCode = newRoomCode();
+  hostPeerId = `demtrang-${roomCode.toLowerCase()}`;
+  elements.create.disabled = true;
+  elements.connectionError.textContent = "Đang tạo phòng...";
 
-  renderBoard();
+  peer = new Peer(hostPeerId);
+  peer.on("open", () => {
+    room = {
+      config: { wolf: 1, seer: 0, witch: 0, guard: 0 },
+      players: [
+        {
+          id: randomId(),
+          name: localName,
+          owner: true,
+          online: true,
+          alive: true,
+          role: null,
+          abilities: { save: true, poison: true },
+          privateNote: "",
+        },
+      ],
+      game: null,
+    };
+    localPlayerId = room.players[0].id;
+    elements.connectionError.textContent = "";
+    showScreen("lobby");
+    broadcastState();
+  });
+  peer.on("connection", attachHostConnection);
+  peer.on("error", (error) => {
+    console.error("Lỗi kết nối phòng:", error);
+    elements.create.disabled = false;
+    elements.connectionError.textContent =
+      error.type === "unavailable-id"
+        ? "Mã phòng vừa được sử dụng. Hãy thử tạo phòng khác."
+        : "Không thể tạo phòng. Kiểm tra kết nối Internet rồi thử lại.";
+  });
+  peer.on("disconnected", () => {
+    elements.gameConnectionStatus.textContent = "Mất kết nối dịch vụ phòng.";
+  });
 }
 
-function toggleFlagAt(row, col) {
-  if (gameOver) return;
-
-  const selectedCell = board[row][col];
-  if (selectedCell.revealed) return;
-
-  selectedCell.flagged = !selectedCell.flagged;
-  flaggedCount += selectedCell.flagged ? 1 : -1;
-  mineCountElement.textContent = String(MINE_COUNT - flaggedCount);
-
-  if (selectedCell.flagged) {
-    setStatus('Đã đặt cờ');
-  } else {
-    setStatus('Đã bỏ cờ');
-  }
-
-  renderBoard();
-}
-
-function renderBoard() {
-  boardElement.innerHTML = '';
-
-  for (let row = 0; row < BOARD_SIZE; row += 1) {
-    for (let col = 0; col < BOARD_SIZE; col += 1) {
-      const cell = board[row][col];
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'cell';
-      button.dataset.row = String(row);
-      button.dataset.col = String(col);
-
-      if (cell.revealed) {
-        button.classList.add('revealed');
-      }
-
-      if (cell.flagged) {
-        button.classList.add('flagged');
-        button.textContent = '🚩';
-      } else if (cell.revealed && cell.mine) {
-        button.classList.add('mine');
-        button.textContent = '💣';
-      } else if (cell.revealed && cell.adjacent > 0) {
-        button.textContent = cell.adjacent;
-        button.dataset.value = String(cell.adjacent);
-      } else if (cell.revealed) {
-        button.textContent = '';
-      }
-
-      if (cell.revealed && cell.mine) {
-        button.classList.add('mine');
-      }
-
-      button.addEventListener('click', () => {
-        revealAt(row, col);
-      });
-
-      button.addEventListener('contextmenu', (event) => {
-        event.preventDefault();
-        toggleFlagAt(row, col);
-      });
-
-      boardElement.appendChild(button);
+function attachHostConnection(connection) {
+  connection.on("data", (message) => {
+    if (!message || typeof message !== "object") return;
+    if (!connection.playerId) {
+      if (message.type === "join") handleJoin(connection, message);
+      return;
     }
+    if (message.type === "action") handlePlayerAction(connection.playerId, message.action);
+  });
+
+  connection.on("close", () => {
+    const playerId = connection.playerId;
+    if (!playerId || roomConnections.get(playerId) !== connection) return;
+    roomConnections.delete(playerId);
+    const player = room?.players.find((entry) => entry.id === playerId);
+    if (!player) return;
+    player.online = false;
+    if (!room.game) room.players = room.players.filter((entry) => entry.id !== playerId);
+    broadcastState();
+  });
+
+  connection.on("error", (error) => {
+    console.warn("Kết nối người chơi gặp lỗi:", error);
+  });
+}
+
+function handleJoin(connection, message) {
+  const name = typeof message.name === "string" ? message.name.trim().slice(0, 20) : "";
+  if (name.length < 2) {
+    rejectConnection(connection, "Tên cần có từ 2 đến 20 ký tự.");
+    return;
+  }
+
+  const token = typeof message.token === "string" ? message.token : "";
+  let player = token ? room.players.find((entry) => entry.id === token) : null;
+
+  if (!player) {
+    if (room.game) {
+      rejectConnection(connection, "Ván đã bắt đầu; phòng không nhận người chơi mới.");
+      return;
+    }
+    if (room.players.length >= MAX_PLAYERS) {
+      rejectConnection(connection, `Phòng đã đủ ${MAX_PLAYERS} người.`);
+      return;
+    }
+    player = {
+      id: randomId(),
+      name,
+      owner: false,
+      online: true,
+      alive: true,
+      role: null,
+      abilities: { save: true, poison: true },
+      privateNote: "",
+    };
+    room.players.push(player);
+  } else {
+    const previousConnection = roomConnections.get(player.id);
+    if (previousConnection && previousConnection !== connection) previousConnection.close();
+    player.name = name;
+    player.online = true;
+  }
+
+  connection.playerId = player.id;
+  roomConnections.set(player.id, connection);
+  connection.send({ type: "welcome", playerId: player.id });
+  broadcastState();
+}
+
+function rejectConnection(connection, message) {
+  connection.send({ type: "error", message });
+  window.setTimeout(() => connection.close(), 300);
+}
+
+function joinRoom(event) {
+  event.preventDefault();
+  if (typeof Peer === "undefined") {
+    elements.connectionError.textContent =
+      "Không tải được dịch vụ kết nối. Kiểm tra Internet rồi tải lại trang.";
+    return;
+  }
+
+  localName = getPlayerName();
+  if (!localName) return;
+  roomCode = elements.roomCodeInput.value.trim().toUpperCase();
+  if (!/^[A-HJ-NP-Z2-9]{6}$/.test(roomCode)) {
+    elements.connectionError.textContent = "Mã phòng gồm 6 chữ cái hoặc chữ số.";
+    return;
+  }
+
+  elements.connectionError.textContent = "Đang kết nối với phòng...";
+  document.getElementById("join-room").disabled = true;
+  hostPeerId = `demtrang-${roomCode.toLowerCase()}`;
+  peer = new Peer();
+
+  peer.on("open", () => connectToHost());
+  peer.on("error", (error) => {
+    console.error("Lỗi kết nối phòng:", error);
+    if (error.type === "peer-unavailable") {
+      showJoinError("Không tìm thấy phòng. Kiểm tra mã hoặc hỏi chủ phòng xem phòng còn mở không.");
+    } else if (error.type !== "disconnected") {
+      showJoinError("Kết nối bị gián đoạn. Hãy thử lại sau.");
+    }
+  });
+}
+
+function showJoinError(message) {
+  elements.connectionError.textContent = message;
+  document.getElementById("join-room").disabled = false;
+}
+
+function connectToHost() {
+  if (!peer || !peer.open || isHost) return;
+  const tokenKey = `werewolf-player-${roomCode}`;
+  const token = localStorage.getItem(tokenKey) || "";
+  const connection = peer.connect(hostPeerId, { reliable: true });
+  hostConnection = connection;
+
+  const connectionTimeout = window.setTimeout(() => {
+    if (!room && hostConnection === connection) {
+      showJoinError("Không thể kết nối. Kiểm tra mã phòng và kết nối Internet.");
+      connection.close();
+    }
+  }, 15000);
+
+  connection.on("open", () => {
+    window.clearTimeout(connectionTimeout);
+    connection.send({ type: "join", name: localName, token });
+  });
+  connection.on("data", (message) => {
+    if (message.type === "welcome") {
+      localPlayerId = message.playerId;
+      localStorage.setItem(tokenKey, localPlayerId);
+      elements.connectionError.textContent = "";
+      document.getElementById("join-room").disabled = false;
+    } else if (message.type === "error") {
+      showJoinError(message.message);
+    } else if (message.type === "state") {
+      roomCode = message.state.code;
+      room = message.state;
+      myPrivateState = message.me;
+      localPlayerId = message.me.id;
+      localStorage.setItem(tokenKey, localPlayerId);
+      elements.connectionError.textContent = "";
+      elements.gameConnectionStatus.textContent = "";
+      document.getElementById("join-room").disabled = false;
+      render(message.state, message.me);
+    }
+  });
+  connection.on("close", () => {
+    if (hostConnection !== connection) return;
+    hostConnection = null;
+    if (!room) {
+      showJoinError("Kết nối tới phòng bị đóng. Hãy kiểm tra mã và thử lại.");
+      return;
+    }
+    elements.gameConnectionStatus.textContent = "Mất kết nối — đang thử kết nối lại…";
+    window.clearTimeout(reconnectTimeout);
+    reconnectTimeout = window.setTimeout(connectToHost, 2500);
+  });
+  connection.on("error", (error) => {
+    console.warn("Kết nối tới phòng gặp lỗi:", error);
+  });
+}
+
+function publicSnapshot() {
+  const finished = room.game?.phase === "ended";
+  return {
+    code: roomCode,
+    ownerId: room.players.find((player) => player.owner)?.id,
+    config: { ...room.config },
+    players: room.players.map((player) => ({
+      id: player.id,
+      name: player.name,
+      owner: player.owner,
+      online: player.online,
+      alive: player.alive,
+      role: finished || !player.alive ? player.role : null,
+    })),
+    game: room.game
+      ? {
+          phase: room.game.phase,
+          round: room.game.round,
+          endsAt: room.game.endsAt,
+          announcement: room.game.announcement,
+          winner: room.game.winner,
+          voteCount: Object.keys(room.game.votes).length,
+          nightVoteCount: Object.keys(room.game.nightVotes).length,
+          powerActionCount: Object.keys(room.game.powerActions).length,
+        }
+      : null,
+  };
+}
+
+function privateState(player) {
+  const game = room.game;
+  return {
+    id: player.id,
+    role: player.role,
+    alive: player.alive,
+    abilities: { ...player.abilities },
+    note: player.privateNote,
+    nightTarget: game?.phase === "powers" && player.role === "witch" ? game.nightTarget : "",
+    wolfTeamIds:
+      player.role === "wolf"
+        ? room.players.filter((entry) => entry.role === "wolf").map((entry) => entry.id)
+        : [],
+    hasActed:
+      game?.phase === "wolves"
+        ? Object.hasOwn(game.nightVotes, player.id)
+        : game?.phase === "powers"
+          ? Object.hasOwn(game.powerActions, player.id)
+          : game?.phase === "vote"
+            ? Object.hasOwn(game.votes, player.id)
+            : false,
+    lastGuardTarget: player.lastGuardTarget || "",
+  };
+}
+
+function broadcastState() {
+  if (!room) return;
+  const state = publicSnapshot();
+  render(state, privateState(room.players.find((player) => player.id === localPlayerId)));
+  for (const [playerId, connection] of roomConnections) {
+    if (connection.open) {
+      connection.send({
+        type: "state",
+        state,
+        me: privateState(room.players.find((player) => player.id === playerId)),
+      });
+    }
+  }
+}
+
+function render(state = publicSnapshot(), privateData = privateState(room.players.find((player) => player.id === localPlayerId))) {
+  if (!room) return;
+  myPrivateState = privateData;
+  if (!state.game) {
+    showScreen("lobby");
+    renderLobby(state);
+  } else {
+    showScreen("game");
+    renderGame(state, privateData);
+  }
+}
+
+function renderLobby(state) {
+  const owner = localPlayerId === state.ownerId;
+  elements.roomCode.textContent = state.code;
+  elements.lobbyDescription.textContent = owner
+    ? "Mời bạn bè bằng mã hoặc đường dẫn phòng. Bạn sẽ chơi như mọi người khác."
+    : "Đang chờ chủ phòng bắt đầu ván chơi.";
+  elements.rolesPanel.hidden = !owner;
+  elements.start.hidden = !owner;
+  elements.playerCount.textContent = `${state.players.length}/${MAX_PLAYERS}`;
+  elements.playerList.replaceChildren();
+
+  for (const player of state.players) {
+    const row = createPlayerRow(player, owner && player.id === localPlayerId);
+    elements.playerList.append(row);
+  }
+
+  if (!owner) {
+    elements.lobbyStatus.textContent = "Đang đợi chủ phòng bắt đầu ván.";
+    return;
+  }
+  renderRoleSettings(state.config, state.players.length);
+  const counts = Object.values(state.config).reduce((sum, value) => sum + value, 0);
+  const villagers = state.players.length - counts;
+  const tooMany = villagers < 1;
+  const tooFewPlayers = state.players.length < MIN_PLAYERS;
+  elements.rolesError.textContent = tooMany
+    ? "Cần chừa ít nhất một chỗ cho dân làng."
+    : tooFewPlayers
+      ? `Cần ít nhất ${MIN_PLAYERS} người để bắt đầu.`
+      : "";
+  elements.start.disabled = tooMany || tooFewPlayers || state.config.wolf < 1;
+  elements.lobbyStatus.textContent = `${state.players.length} người · ${state.config.wolf} sói · ${Math.max(0, villagers)} dân làng`;
+}
+
+function renderRoleSettings(config, playerCount) {
+  elements.roleSettings.replaceChildren();
+  for (const role of ROLE_SETTINGS) {
+    const row = document.createElement("div");
+    row.className = "role-setting";
+    const info = document.createElement("div");
+    info.className = "role-setting-info";
+    const label = document.createElement("b");
+    label.textContent = role.label;
+    const hint = document.createElement("span");
+    hint.textContent = role.hint;
+    info.append(label, hint);
+
+    const counter = document.createElement("div");
+    counter.className = "role-counter";
+    const minus = document.createElement("button");
+    minus.type = "button";
+    minus.textContent = "−";
+    minus.setAttribute("aria-label", `Giảm số ${role.label}`);
+    minus.disabled = config[role.id] <= (role.id === "wolf" ? 1 : 0);
+    minus.addEventListener("click", () => changeRoleCount(role.id, -1));
+    const value = document.createElement("output");
+    value.textContent = String(config[role.id]);
+    const plus = document.createElement("button");
+    plus.type = "button";
+    plus.textContent = "+";
+    plus.setAttribute("aria-label", `Tăng số ${role.label}`);
+    const total = Object.values(config).reduce((sum, count) => sum + count, 0);
+    plus.disabled = total >= playerCount - 1;
+    plus.addEventListener("click", () => changeRoleCount(role.id, 1));
+    counter.append(minus, value, plus);
+    row.append(info, counter);
+    elements.roleSettings.append(row);
+  }
+}
+
+function changeRoleCount(role, difference) {
+  if (!isHost || !room || room.game) return;
+  const next = room.config[role] + difference;
+  if (next < (role === "wolf" ? 1 : 0)) return;
+  const total = Object.values(room.config).reduce((sum, count) => sum + count, 0);
+  if (difference > 0 && total >= room.players.length - 1) {
+    showToast("Cần để trống ít nhất một vai cho dân làng.");
+    return;
+  }
+  room.config[role] = next;
+  broadcastState();
+}
+
+function createPlayerRow(player, isSelf = false) {
+  const row = document.createElement("li");
+  row.className = "player-row";
+  if (!player.alive) row.classList.add("is-dead");
+  const avatar = document.createElement("span");
+  avatar.className = "player-avatar";
+  avatar.textContent = player.name.charAt(0).toUpperCase();
+  const name = document.createElement("span");
+  name.className = "player-name";
+  name.textContent = `${player.name}${isSelf ? " (bạn)" : ""}`;
+  row.append(avatar, name);
+  if (player.role) {
+    const role = document.createElement("span");
+    role.className = "dead-role";
+    role.textContent = ROLE_INFO[player.role]?.label || player.role;
+    row.append(role);
+  } else if (player.owner) {
+    const host = document.createElement("span");
+    host.className = "host-tag";
+    host.textContent = "CHỦ PHÒNG";
+    row.append(host);
+  }
+  if (!player.online) {
+    const offline = document.createElement("span");
+    offline.className = "offline-tag";
+    offline.textContent = "MẤT KẾT NỐI";
+    row.append(offline);
+  }
+  return row;
+}
+
+function startGame() {
+  if (!isHost || !room || room.game) return;
+  const total = Object.values(room.config).reduce((sum, count) => sum + count, 0);
+  if (
+    room.players.length < MIN_PLAYERS ||
+    room.players.length > MAX_PLAYERS ||
+    room.config.wolf < 1 ||
+    total >= room.players.length
+  ) {
+    showToast("Số người chơi hoặc số lượng vai trò chưa hợp lệ.");
+    return;
+  }
+
+  const roles = [];
+  for (const [role, count] of Object.entries(room.config)) {
+    for (let index = 0; index < count; index += 1) roles.push(role);
+  }
+  while (roles.length < room.players.length) roles.push("villager");
+  shuffle(roles);
+
+  room.players.forEach((player, index) => {
+    player.role = roles[index];
+    player.alive = true;
+    player.abilities = { save: true, poison: true };
+    player.privateNote = "";
+    player.lastGuardTarget = "";
+  });
+
+  room.game = {
+    phase: "wolves",
+    round: 0,
+    endsAt: 0,
+    announcement: "Dân làng chìm vào giấc ngủ. Sói hãy chọn mục tiêu.",
+    winner: "",
+    votes: {},
+    nightVotes: {},
+    powerActions: {},
+    nightTarget: "",
+    lastGuardTarget: "",
+  };
+  beginNight();
+}
+
+function shuffle(items) {
+  for (let index = items.length - 1; index > 0; index -= 1) {
+    const swapIndex = crypto.getRandomValues(new Uint32Array(1))[0] % (index + 1);
+    [items[index], items[swapIndex]] = [items[swapIndex], items[index]];
+  }
+  return items;
+}
+
+function schedulePhase(callback) {
+  window.clearTimeout(phaseTimeout);
+  room.game.endsAt = Date.now() + PHASE_SECONDS * 1000;
+  phaseTimeout = window.setTimeout(callback, PHASE_SECONDS * 1000);
+}
+
+function beginNight() {
+  if (!room.game || room.game.phase === "ended") return;
+  room.game.round += 1;
+  room.game.phase = "wolves";
+  room.game.votes = {};
+  room.game.nightVotes = {};
+  room.game.powerActions = {};
+  room.game.nightTarget = "";
+  const voteResult = room.game.lastVoteAnnouncement;
+  room.game.lastVoteAnnouncement = "";
+  room.game.announcement = [
+    voteResult,
+    `Đêm ${room.game.round}: sói hãy chọn một người để tấn công.`,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  schedulePhase(startPowers);
+  broadcastState();
+  if (wolfActors().length === 0) startPowers();
+}
+
+function wolfActors() {
+  return room.players.filter((player) => player.alive && player.online && player.role === "wolf");
+}
+
+function powerActors() {
+  return room.players.filter((player) => {
+    if (!player.alive || !player.online) return false;
+    if (player.role === "seer" || player.role === "guard") return true;
+    return player.role === "witch" && (player.abilities.save || player.abilities.poison);
+  });
+}
+
+function startPowers() {
+  if (!room?.game || room.game.phase !== "wolves") return;
+  window.clearTimeout(phaseTimeout);
+  room.game.nightTarget = mostVotedTarget(room.game.nightVotes);
+  room.game.phase = "powers";
+  room.game.announcement = "Đêm vẫn còn dài. Những vai trò đặc biệt hãy hành động.";
+  schedulePhase(resolveNight);
+  broadcastState();
+  if (powerActors().length === 0) resolveNight();
+}
+
+function mostVotedTarget(votes) {
+  const counts = new Map();
+  for (const target of Object.values(votes)) {
+    counts.set(target, (counts.get(target) || 0) + 1);
+  }
+  if (!counts.size) return "";
+  const highest = Math.max(...counts.values());
+  const leaders = [...counts].filter(([, count]) => count === highest);
+  return leaders.length === 1 ? leaders[0][0] : "";
+}
+
+function handlePlayerAction(playerId, action) {
+  if (!room?.game || !action || typeof action !== "object") return;
+  const player = room.players.find((entry) => entry.id === playerId);
+  if (!player?.alive || !player.online) return;
+
+  if (room.game.phase === "wolves") {
+    if (player.role !== "wolf" || Object.hasOwn(room.game.nightVotes, playerId)) return;
+    const target = room.players.find((entry) => entry.id === action.target);
+    if (!target?.alive || target.role === "wolf") return;
+    room.game.nightVotes[playerId] = target.id;
+    if (wolfActors().every((actor) => Object.hasOwn(room.game.nightVotes, actor.id))) startPowers();
+    else broadcastState();
+    return;
+  }
+
+  if (room.game.phase === "powers") {
+    if (!powerActors().some((actor) => actor.id === playerId)) return;
+    if (Object.hasOwn(room.game.powerActions, playerId)) return;
+    const result = validatePowerAction(player, action);
+    if (!result.valid) return;
+    room.game.powerActions[playerId] = { ...result.action, actorId: playerId };
+    if (result.note) player.privateNote = result.note;
+    if (powerActors().every((actor) => Object.hasOwn(room.game.powerActions, actor.id))) resolveNight();
+    else broadcastState();
+    return;
+  }
+
+  if (room.game.phase === "vote") {
+    if (Object.hasOwn(room.game.votes, playerId)) return;
+    const target = action.target === "" ? null : room.players.find((entry) => entry.id === action.target);
+    if (action.target && (!target?.alive || target.id === playerId)) return;
+    room.game.votes[playerId] = target?.id || "";
+    if (voters().every((voter) => Object.hasOwn(room.game.votes, voter.id))) resolveVote();
+    else broadcastState();
+  }
+}
+
+function validatePowerAction(player, action) {
+  if (player.role === "seer") {
+    const target = room.players.find((entry) => entry.id === action.target && entry.alive && entry.id !== player.id);
+    if (!target) return { valid: false };
+    const result = target.role === "wolf" ? "thuộc phe Sói" : "không thuộc phe Sói";
+    return {
+      valid: true,
+      action: { type: "seer", target: target.id },
+      note: `Tiên tri: ${target.name} ${result}.`,
+    };
+  }
+
+  if (player.role === "guard") {
+    if (action.pass) return { valid: true, action: { type: "guard" } };
+    const target = room.players.find(
+      (entry) =>
+        entry.id === action.target &&
+        entry.alive &&
+        entry.id !== player.id &&
+        entry.id !== player.lastGuardTarget
+    );
+    if (!target) return { valid: false };
+    return { valid: true, action: { type: "guard", target: target.id } };
+  }
+
+  if (player.role === "witch") {
+    const save = action.save === true && player.abilities.save;
+    let poisonTarget = "";
+    if (action.poisonTarget && player.abilities.poison) {
+      const target = room.players.find(
+        (entry) => entry.id === action.poisonTarget && entry.alive && entry.id !== player.id
+      );
+      if (!target) return { valid: false };
+      poisonTarget = target.id;
+    }
+    return {
+      valid: true,
+      action: { type: "witch", save, poisonTarget },
+    };
+  }
+
+  return { valid: false };
+}
+
+function resolveNight() {
+  if (!room?.game || room.game.phase !== "powers") return;
+  window.clearTimeout(phaseTimeout);
+  const game = room.game;
+  const actions = Object.values(game.powerActions);
+  const guardTargets = new Set(
+    actions.filter((action) => action.type === "guard" && action.target).map((action) => action.target)
+  );
+  const witches = actions.filter((action) => action.type === "witch");
+  const saveUsed = witches.some((witch) => witch.save);
+  const wolfTarget = game.nightTarget;
+  const deaths = new Set();
+
+  for (const action of actions.filter((entry) => entry.type === "guard")) {
+    const player = room.players.find((entry) => entry.id === action.actorId);
+    if (player && action.target) player.lastGuardTarget = action.target;
+  }
+  for (const witch of witches) {
+    const player = room.players.find((entry) => entry.id === witch.actorId);
+    if (!player) continue;
+    if (witch.save && player.abilities.save) player.abilities.save = false;
+    if (witch.poisonTarget && player.abilities.poison) {
+      player.abilities.poison = false;
+      deaths.add(witch.poisonTarget);
+    }
+  }
+  if (wolfTarget && !guardTargets.has(wolfTarget) && !saveUsed) {
+    deaths.add(wolfTarget);
+  }
+
+  for (const player of room.players) {
+    if (deaths.has(player.id)) player.alive = false;
+  }
+
+  const names = room.players
+    .filter((player) => deaths.has(player.id))
+    .map((player) => `${player.name} (${ROLE_INFO[player.role]?.label || "?"})`);
+  game.announcement =
+    names.length > 0
+      ? `Trời sáng. ${names.join(" và ")} ${names.length === 1 ? "đã" : "đã"} bị hạ gục.`
+      : "Trời sáng. Đêm qua không ai bị hạ gục.";
+
+  const winner = getWinner();
+  if (winner) {
+    finishGame(winner);
+    return;
+  }
+
+  game.phase = "discussion";
+  schedulePhase(startVoting);
+  broadcastState();
+}
+
+function voters() {
+  return room.players.filter((player) => player.alive && player.online);
+}
+
+function startVoting() {
+  if (!room?.game || room.game.phase !== "discussion") return;
+  room.game.phase = "vote";
+  room.game.votes = {};
+  room.game.announcement = "Thảo luận kết thúc. Hãy bỏ phiếu kín cho người bạn nghi là sói.";
+  schedulePhase(resolveVote);
+  broadcastState();
+}
+
+function resolveVote() {
+  if (!room?.game || room.game.phase !== "vote") return;
+  window.clearTimeout(phaseTimeout);
+  const counts = new Map();
+  for (const target of Object.values(room.game.votes)) {
+    if (target) counts.set(target, (counts.get(target) || 0) + 1);
+  }
+  const highest = counts.size ? Math.max(...counts.values()) : 0;
+  const leaders = [...counts].filter(([, count]) => count === highest);
+  let announcement = "Không có ai bị loại: dân làng đã bỏ phiếu trắng.";
+
+  if (leaders.length === 1) {
+    const eliminated = room.players.find((player) => player.id === leaders[0][0]);
+    if (eliminated?.alive) {
+      eliminated.alive = false;
+      announcement = `${eliminated.name} bị dân làng loại — ${ROLE_INFO[eliminated.role]?.label || "?"}.`;
+    }
+  } else if (leaders.length > 1) {
+    announcement = "Phiếu hòa. Không ai bị loại trong hôm nay.";
+  }
+
+  room.game.announcement = announcement;
+  const winner = getWinner();
+  if (winner) finishGame(winner);
+  else {
+    room.game.lastVoteAnnouncement = announcement;
+    beginNight();
+  }
+}
+
+function getWinner() {
+  const alive = room.players.filter((player) => player.alive);
+  const wolves = alive.filter((player) => player.role === "wolf").length;
+  const village = alive.length - wolves;
+  if (wolves === 0) return "village";
+  if (wolves >= village) return "wolves";
+  return "";
+}
+
+function finishGame(winner) {
+  window.clearTimeout(phaseTimeout);
+  room.game.phase = "ended";
+  room.game.endsAt = 0;
+  room.game.winner = winner;
+  room.game.announcement =
+    winner === "village"
+      ? "Dân làng đã tìm ra và loại hết ma sói. Ngôi làng chiến thắng!"
+      : "Ma sói đã chiếm ưu thế trong ngôi làng. Phe Sói chiến thắng!";
+  broadcastState();
+}
+
+function renderGame(state, me) {
+  const game = state.game;
+  const phase = game.phase;
+  const roleInfo = ROLE_INFO[me.role] || ROLE_INFO.villager;
+  const phaseKey = `${game.round}:${phase}`;
+  if (lastActionPhase !== phaseKey) {
+    lastActionPhase = phaseKey;
+    pendingPoisonTarget = "";
+    pendingSave = true;
+  }
+
+  elements.round.textContent = String(game.round);
+  elements.role.textContent = roleInfo.label;
+  elements.roleSymbol.textContent = roleInfo.symbol;
+  elements.roleDescription.textContent = roleInfo.description;
+  elements.announcement.textContent = game.announcement;
+  elements.privateNote.textContent = me.note || "";
+  elements.aliveCount.textContent = `${state.players.filter((player) => player.alive).length} còn sống`;
+  elements.gamePlayerList.replaceChildren();
+  for (const player of state.players) {
+    elements.gamePlayerList.append(createPlayerRow(player, player.id === me.id));
+  }
+
+  const phaseDetails = {
+    wolves: ["Đêm xuống", "Bầy sói đang thức. Chọn một mục tiêu chung."],
+    powers: ["Đêm xuống", "Các vai trò đặc biệt đang hành động."],
+    discussion: ["Thảo luận ban ngày", "Hãy trò chuyện bên ngoài trò chơi và tìm ra manh mối."],
+    vote: ["Bỏ phiếu", "Mỗi người còn sống có một lá phiếu kín."],
+    ended: ["Ván chơi kết thúc", "Vai trò của cả làng đã được tiết lộ."],
+  };
+  [elements.phaseTitle.textContent, elements.actionDescription.textContent] =
+    phaseDetails[phase] || phaseDetails.ended;
+  elements.actionTitle.textContent =
+    phase === "discussion" ? "Thảo luận" : phase === "vote" ? "Bỏ phiếu kín" : "Lượt của bạn";
+
+  renderActions(phase, state, me);
+  updateTimer();
+}
+
+function addPrompt(parent, text) {
+  const prompt = document.createElement("p");
+  prompt.className = "action-prompt";
+  prompt.textContent = text;
+  parent.append(prompt);
+}
+
+function addTargetButtons(parent, players, onSelect, selectedId = "") {
+  const list = document.createElement("div");
+  list.className = "target-list";
+  for (const player of players) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `target-button${player.id === selectedId ? " is-selected" : ""}`;
+    button.textContent = player.name;
+    button.addEventListener("click", () => onSelect(player.id));
+    list.append(button);
+  }
+  parent.append(list);
+}
+
+function addConfirm(parent, text, action) {
+  const controls = document.createElement("div");
+  controls.className = "action-controls";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "button button-primary";
+  button.textContent = text;
+  button.addEventListener("click", action);
+  controls.append(button);
+  parent.append(controls);
+}
+
+function addConfirmed(parent, text) {
+  const message = document.createElement("div");
+  message.className = "action-confirmed";
+  message.textContent = text;
+  parent.append(message);
+}
+
+function renderActions(phase, state, me) {
+  const area = elements.actionArea;
+  area.replaceChildren();
+  const livingOthers = state.players.filter((player) => player.alive && player.id !== me.id);
+
+  if (phase === "ended") {
+    addConfirmed(area, state.game.winner === "village" ? "Dân làng chiến thắng!" : "Ma sói chiến thắng!");
+    if (localPlayerId === state.ownerId) {
+      addConfirm(area, "Trở về phòng chờ", resetGame);
+    }
+    return;
+  }
+  if (phase === "discussion") {
+    addConfirmed(area, "Thời gian thảo luận đang diễn ra. Lượt bỏ phiếu sẽ tự động bắt đầu.");
+    return;
+  }
+  if (!me.alive) {
+    addConfirmed(area, "Bạn đã bị loại. Hãy theo dõi ván chơi đến khi kết thúc.");
+    return;
+  }
+  if (phase === "wolves" && me.role === "wolf") {
+    if (me.hasActed) {
+      addConfirmed(area, "Bạn đã bỏ phiếu cho mục tiêu của bầy sói.");
+      return;
+    }
+    addPrompt(area, "Chọn một người không thuộc phe Sói:");
+    const wolfTeamIds = new Set(me.wolfTeamIds || []);
+    addTargetButtons(area, state.players.filter((player) => player.alive && !wolfTeamIds.has(player.id)), (id) => {
+      submitAction({ target: id });
+    });
+    return;
+  }
+  if (phase === "powers") {
+    if (me.hasActed) {
+      addConfirmed(area, "Bạn đã hoàn thành lượt đêm.");
+      return;
+    }
+    if (me.role === "seer") {
+      addPrompt(area, "Soi một người để biết họ có thuộc phe Sói không:");
+      addTargetButtons(area, livingOthers, (id) => submitAction({ target: id }));
+      return;
+    }
+    if (me.role === "guard") {
+      const protectable = livingOthers.filter((player) => player.id !== me.lastGuardTarget);
+      addPrompt(area, "Chọn một người để bảo vệ trong đêm nay:");
+      addTargetButtons(area, protectable, (id) => submitAction({ target: id }));
+      const controls = document.createElement("div");
+      controls.className = "action-controls";
+      const skip = document.createElement("button");
+      skip.type = "button";
+      skip.className = "button button-secondary";
+      skip.textContent = "Bỏ qua lượt này";
+      skip.addEventListener("click", () => submitAction({ pass: true }));
+      controls.append(skip);
+      area.append(controls);
+      return;
+    }
+    if (me.role === "witch" && (me.abilities.save || me.abilities.poison)) {
+      renderWitchActions(area, state, me);
+      return;
+    }
+    addConfirmed(area, "Đang chờ các vai trò đặc biệt hành động.");
+    return;
+  }
+  if (phase === "vote") {
+    if (me.hasActed) {
+      addConfirmed(area, "Lá phiếu của bạn đã được ghi nhận kín.");
+      return;
+    }
+    addPrompt(area, "Ai là người bạn nghi thuộc phe Sói?");
+    addTargetButtons(area, livingOthers, (id) => submitAction({ target: id }));
+    const controls = document.createElement("div");
+    controls.className = "action-controls";
+    const skip = document.createElement("button");
+    skip.type = "button";
+    skip.className = "button button-secondary";
+    skip.textContent = "Bỏ phiếu trắng";
+    skip.addEventListener("click", () => submitAction({ target: "" }));
+    controls.append(skip);
+    area.append(controls);
+    return;
+  }
+  addConfirmed(area, "Chờ lượt chơi tiếp theo.");
+}
+
+function renderWitchActions(area, state, me) {
+  addPrompt(area, me.nightTarget
+    ? "Sói đã nhắm vào một người. Dùng thuốc cứu để cứu họ."
+    : "Chọn có dùng thuốc cứu trong đêm nay không. Có thể kết hợp với thuốc độc.");
+
+  const controls = document.createElement("div");
+  controls.className = "action-controls";
+  if (me.abilities.save) {
+    const saveButton = document.createElement("button");
+    saveButton.type = "button";
+    saveButton.className = `button ${pendingSave ? "button-primary" : "button-secondary"}`;
+    saveButton.textContent = pendingSave ? "✓ Dùng thuốc cứu" : "Dùng thuốc cứu";
+    saveButton.setAttribute("aria-pressed", String(pendingSave));
+    saveButton.addEventListener("click", () => {
+      pendingSave = !pendingSave;
+      renderGame(room, myPrivateState);
+    });
+    controls.append(saveButton);
+  }
+  if (me.abilities.poison) {
+    const passButton = document.createElement("button");
+    passButton.type = "button";
+    passButton.className = `button ${pendingPoisonTarget ? "button-secondary" : "button-primary"}`;
+    passButton.textContent = pendingPoisonTarget ? "Không dùng thuốc độc" : "Bỏ qua thuốc độc";
+    passButton.addEventListener("click", () => {
+      pendingPoisonTarget = "";
+      renderGame(room, myPrivateState);
+    });
+    controls.append(passButton);
+  }
+  area.append(controls);
+
+  if (me.abilities.poison) {
+    addPrompt(area, "Hoặc chọn một người để đầu độc:");
+    addTargetButtons(area, state.players.filter((player) => player.alive && player.id !== me.id), (id) => {
+      pendingPoisonTarget = id;
+      renderGame(room, myPrivateState);
+    }, pendingPoisonTarget);
+  }
+  const targetName = state.players.find((player) => player.id === pendingPoisonTarget)?.name;
+  addConfirm(area, "Xác nhận hành động", () => {
+    submitAction({ save: me.abilities.save && pendingSave, poisonTarget: pendingPoisonTarget });
+  });
+  if (pendingPoisonTarget) addPrompt(area, `Thuốc độc đang nhắm vào ${targetName}.`);
+}
+
+function submitAction(action) {
+  if (isHost) {
+    handlePlayerAction(localPlayerId, action);
+  } else if (hostConnection?.open) {
+    hostConnection.send({ type: "action", action });
   }
 }
 
 function resetGame() {
-  if (fireworksFrameId !== null) {
-    cancelAnimationFrame(fireworksFrameId);
-    fireworksFrameId = null;
+  if (!isHost || !room || room.game?.phase !== "ended") return;
+  window.clearTimeout(phaseTimeout);
+  room.players = room.players.filter((player) => player.online || player.id === localPlayerId);
+  room.game = null;
+  for (const player of room.players) {
+    player.role = null;
+    player.alive = true;
+    player.abilities = { save: true, poison: true };
+    player.privateNote = "";
   }
-  if (feedbackTimeoutId !== null) {
-    clearTimeout(feedbackTimeoutId);
-    feedbackTimeoutId = null;
-  }
-  if (fireworksContext) {
-    fireworksContext.clearRect(0, 0, fireworksCanvas.width, fireworksCanvas.height);
-  }
-  gameFeedbackElement.hidden = true;
-  board = createEmptyBoard();
-  gameOver = false;
-  firstMove = true;
-  flaggedCount = 0;
-  timeLeft = TIME_LIMIT;
-  mineCountElement.textContent = String(MINE_COUNT);
-  updateTimerDisplay();
-  setStatus('Sẵn sàng');
-  stopTimer();
-  renderBoard();
+  broadcastState();
 }
 
-function handleKeyboardShortcuts(event) {
-  if (event.key === 'r' || event.key === 'R') {
-    event.preventDefault();
-    resetGame();
+function updateTimer() {
+  if (!room?.game || !room.game.endsAt) {
+    elements.timer.textContent = "--";
+    return;
+  }
+  elements.timer.textContent = String(Math.max(0, Math.ceil((room.game.endsAt - Date.now()) / 1000)));
+}
+
+async function copyInvite() {
+  const invite = new URL(window.location.href);
+  invite.searchParams.set("room", roomCode);
+  try {
+    await navigator.clipboard.writeText(invite.toString());
+    showToast("Đã sao chép đường dẫn mời vào phòng.");
+  } catch (error) {
+    console.warn("Không thể sao chép đường dẫn:", error);
+    showToast(`Mã phòng: ${roomCode} — hãy sao chép mã để gửi cho bạn bè.`);
   }
 }
 
-resetButton.addEventListener('click', resetGame);
-document.addEventListener('keydown', handleKeyboardShortcuts);
-resetGame();
+elements.create.addEventListener("click", createRoom);
+elements.joinForm.addEventListener("submit", joinRoom);
+elements.roomCodeInput.addEventListener("input", () => {
+  elements.roomCodeInput.value = elements.roomCodeInput.value.toUpperCase().replace(/[^A-HJ-NP-Z2-9]/g, "").slice(0, 6);
+});
+elements.copyRoom.addEventListener("click", copyInvite);
+elements.start.addEventListener("click", startGame);
+window.setInterval(() => {
+  if (room?.game) updateTimer();
+}, 400);
+
+elements.name.value = localStorage.getItem("werewolf-player-name") || "";
+const roomFromLink = new URLSearchParams(window.location.search).get("room");
+if (roomFromLink) elements.roomCodeInput.value = roomFromLink.toUpperCase().slice(0, 6);
