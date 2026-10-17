@@ -7,6 +7,9 @@ const resetButton = document.getElementById('reset-btn');
 const mineCountElement = document.getElementById('mine-count');
 const timerElement = document.getElementById('timer');
 const statusElement = document.getElementById('status');
+const fireworksCanvas = document.getElementById('fireworks');
+const gameFeedbackElement = document.getElementById('game-feedback');
+const fireworksContext = fireworksCanvas.getContext('2d');
 
 let board = [];
 let gameOver = false;
@@ -14,6 +17,185 @@ let firstMove = true;
 let flaggedCount = 0;
 let timeLeft = TIME_LIMIT;
 let timerId = null;
+let audioContext = null;
+let fireworksFrameId = null;
+let feedbackTimeoutId = null;
+
+function unlockAudio() {
+  if (!audioContext) {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) {
+      console.warn('Trình duyệt không hỗ trợ âm thanh trò chơi.');
+      return;
+    }
+    audioContext = new AudioContextClass();
+  }
+
+  if (audioContext.state === 'suspended') {
+    audioContext.resume().catch((error) => {
+      console.warn('Không thể bật âm thanh trò chơi:', error);
+    });
+  }
+}
+
+function playApplause() {
+  if (!audioContext) return;
+
+  const sampleCount = Math.floor(audioContext.sampleRate * 0.12);
+  const noiseBuffer = audioContext.createBuffer(1, sampleCount, audioContext.sampleRate);
+  const noise = noiseBuffer.getChannelData(0);
+  for (let i = 0; i < sampleCount; i += 1) {
+    noise[i] = Math.random() * 2 - 1;
+  }
+
+  const now = audioContext.currentTime;
+  for (let i = 0; i < 28; i += 1) {
+    const startTime = now + Math.random() * 1.8;
+    const source = audioContext.createBufferSource();
+    const filter = audioContext.createBiquadFilter();
+    const gain = audioContext.createGain();
+
+    source.buffer = noiseBuffer;
+    filter.type = 'highpass';
+    filter.frequency.value = 900;
+    gain.gain.setValueAtTime(0.0001, startTime);
+    gain.gain.exponentialRampToValueAtTime(0.16, startTime + 0.008);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startTime + 0.11);
+
+    source.connect(filter);
+    filter.connect(gain);
+    gain.connect(audioContext.destination);
+    source.start(startTime);
+    source.stop(startTime + 0.12);
+  }
+}
+
+function playBoo() {
+  if (!audioContext) return;
+
+  const now = audioContext.currentTime;
+  const duration = 1.5;
+  const oscillator = audioContext.createOscillator();
+  const undertone = audioContext.createOscillator();
+  const filter = audioContext.createBiquadFilter();
+  const gain = audioContext.createGain();
+  const wobble = audioContext.createOscillator();
+  const wobbleDepth = audioContext.createGain();
+
+  oscillator.type = 'sawtooth';
+  oscillator.frequency.setValueAtTime(145, now);
+  oscillator.frequency.linearRampToValueAtTime(118, now + duration);
+  undertone.type = 'triangle';
+  undertone.frequency.setValueAtTime(138, now);
+  undertone.frequency.linearRampToValueAtTime(112, now + duration);
+  filter.type = 'lowpass';
+  filter.frequency.value = 500;
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.linearRampToValueAtTime(0.12, now + 0.2);
+  gain.gain.setValueAtTime(0.12, now + 1.05);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+
+  wobble.type = 'sine';
+  wobble.frequency.value = 4;
+  wobbleDepth.gain.value = 5;
+  wobble.connect(wobbleDepth);
+  wobbleDepth.connect(oscillator.frequency);
+
+  oscillator.connect(filter);
+  undertone.connect(filter);
+  filter.connect(gain);
+  gain.connect(audioContext.destination);
+  oscillator.start(now);
+  undertone.start(now);
+  wobble.start(now);
+  oscillator.stop(now + duration);
+  undertone.stop(now + duration);
+  wobble.stop(now + duration);
+}
+
+function showFireworks() {
+  const context = fireworksContext;
+  if (!context) return;
+
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  const pixelRatio = window.devicePixelRatio || 1;
+  fireworksCanvas.width = Math.floor(width * pixelRatio);
+  fireworksCanvas.height = Math.floor(height * pixelRatio);
+  context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+
+  const particles = [];
+  const startTime = performance.now();
+  let lastBurstTime = startTime - 400;
+
+  function burst() {
+    const x = width * (0.12 + Math.random() * 0.76);
+    const y = height * (0.12 + Math.random() * 0.48);
+    const hue = Math.floor(Math.random() * 360);
+
+    for (let i = 0; i < 42; i += 1) {
+      const angle = (Math.PI * 2 * i) / 42;
+      const speed = 1.2 + Math.random() * 3.2;
+      particles.push({
+        x,
+        y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        hue,
+        age: 0,
+        lifetime: 55 + Math.random() * 35,
+      });
+    }
+  }
+
+  function animate(now) {
+    const elapsed = now - startTime;
+    if (elapsed < 2300 && now - lastBurstTime >= 380) {
+      burst();
+      lastBurstTime = now;
+    }
+
+    context.clearRect(0, 0, width, height);
+    for (let i = particles.length - 1; i >= 0; i -= 1) {
+      const particle = particles[i];
+      particle.x += particle.vx;
+      particle.y += particle.vy;
+      particle.vy += 0.025;
+      particle.age += 1;
+
+      if (particle.age >= particle.lifetime) {
+        particles.splice(i, 1);
+        continue;
+      }
+
+      context.globalAlpha = 1 - particle.age / particle.lifetime;
+      context.fillStyle = `hsl(${particle.hue}, 100%, 65%)`;
+      context.beginPath();
+      context.arc(particle.x, particle.y, 2.5, 0, Math.PI * 2);
+      context.fill();
+    }
+    context.globalAlpha = 1;
+
+    if (elapsed < 3300) {
+      fireworksFrameId = requestAnimationFrame(animate);
+    } else {
+      context.clearRect(0, 0, width, height);
+      fireworksFrameId = null;
+    }
+  }
+
+  fireworksFrameId = requestAnimationFrame(animate);
+}
+
+function celebrateWin() {
+  gameFeedbackElement.textContent = 'Chúc mừng! Bạn đã chiến thắng! 🎉';
+  gameFeedbackElement.hidden = false;
+  showFireworks();
+  playApplause();
+  feedbackTimeoutId = window.setTimeout(() => {
+    gameFeedbackElement.hidden = true;
+  }, 3300);
+}
 
 function createEmptyBoard() {
   return Array.from({ length: BOARD_SIZE }, () =>
@@ -148,18 +330,24 @@ function stopTimer() {
   }
 }
 
-function endGame(message) {
+function endGame(message, outcome) {
   gameOver = true;
   revealAllMines();
   stopTimer();
   setStatus(message);
   renderBoard();
+
+  if (outcome === 'win') {
+    celebrateWin();
+  } else {
+    playBoo();
+  }
 }
 
 function handleTimeout() {
   if (gameOver) return;
 
-  endGame('Hết giờ! Đáp án đã lộ.');
+  endGame('Hết giờ! Đáp án đã lộ.', 'loss');
 }
 
 function startTimer() {
@@ -182,6 +370,8 @@ function startTimer() {
 function revealAt(row, col) {
   if (gameOver) return;
 
+  unlockAudio();
+
   if (firstMove) {
     placeMines(row, col);
     firstMove = false;
@@ -193,14 +383,14 @@ function revealAt(row, col) {
 
   if (selectedCell.mine) {
     selectedCell.revealed = true;
-    endGame('Boom! Đáp án đã lộ.');
+    endGame('Boom! Đáp án đã lộ.', 'loss');
     return;
   }
 
   revealEmptyArea(row, col);
 
   if (checkWin()) {
-    endGame('Bạn thắng! Đáp án đã lộ.');
+    endGame('Bạn thắng! Đáp án đã lộ.', 'win');
   } else {
     setStatus('Đang chơi');
   }
@@ -275,6 +465,18 @@ function renderBoard() {
 }
 
 function resetGame() {
+  if (fireworksFrameId !== null) {
+    cancelAnimationFrame(fireworksFrameId);
+    fireworksFrameId = null;
+  }
+  if (feedbackTimeoutId !== null) {
+    clearTimeout(feedbackTimeoutId);
+    feedbackTimeoutId = null;
+  }
+  if (fireworksContext) {
+    fireworksContext.clearRect(0, 0, fireworksCanvas.width, fireworksCanvas.height);
+  }
+  gameFeedbackElement.hidden = true;
   board = createEmptyBoard();
   gameOver = false;
   firstMove = true;

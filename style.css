@@ -191,6 +191,46 @@ h1 {
 .cell[data-value="7"] { color: #111827; }
 .cell[data-value="8"] { color: #6b7280; }
 
+#fireworks {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.game-feedback {
+  position: fixed;
+  top: 12%;
+  left: 50%;
+  z-index: 11;
+  padding: 14px 22px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 14px;
+  background: rgba(17, 24, 39, 0.94);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  color: #fde68a;
+  font-size: clamp(1.15rem, 4vw, 1.8rem);
+  font-weight: 800;
+  text-align: center;
+  transform: translateX(-50%);
+  animation: feedback-pop 0.35s ease-out both;
+  pointer-events: none;
+}
+
+@keyframes feedback-pop {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -12px) scale(0.9);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+}
+
 @media (max-width: 480px) {
   .game {
     padding: 14px;
@@ -205,5 +245,11 @@ h1 {
     width: 24px;
     height: 24px;
     font-size: 0.75rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .game-feedback {
+    animation: none;
   }
 }
